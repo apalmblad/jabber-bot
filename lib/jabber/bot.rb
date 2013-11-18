@@ -316,30 +316,24 @@ module Jabber
       end
       @jabber.auth( @config[:password] )
       @jabber.send( Jabber::Presence.new.set_type( :available ) )
-      eliver( Command.master, (@config[:startup_message] || "NAME reporting for duty.").gsub("NAME", @config[:name]))
+      deliver( Command.master, (@config[:startup_message] || "NAME reporting for duty.").gsub("NAME", @config[:name]))
 
       start_listener_thread
       Thread.stop
     end
 
-    def connect
-      @jabber = Jabber::Simple.new(@config[:jabber_id], @config[:password])
-
-      presence(@config[:presence], @config[:status], @config[:priority])
-
-
-      start_listener_thread
-    end
 
     # Deliver a message to the specified recipient(s). Accepts a single
     # recipient or an Array of recipients.
-    def deliver(to, message)
-      if to.is_a?(Array)
-        to.each { |t| @jabber.deliver(t, message) }
-      else
-        @jabber.deliver(to, message)
+    def deliver( to, message )
+      to = [to] unless to.is_a?( Array )
+      to.each do |email|
+        msg = Jabber::Message::new( email, message )
+        msg.type = :chat
+        @jabber.send( msg )
       end
     end
+
 
     # Disconnect the bot.  Once the bot has been disconnected, there is no way
     # to restart it by issuing a command.
@@ -446,6 +440,10 @@ module Jabber
         end
       end
     end
+    def jabber_id
+      @jabber_id ||= Jabber::JID::new( @config[:jabber_id] )
+    end
+
 
     # Creates a new Thread dedicated to listening for incoming chat messages.
     # When a chat message is received, the bot checks if the sender is its
@@ -455,30 +453,15 @@ module Jabber
     #
     # Only the chat message type is supported. Other message types such as
     # error and groupchat are not supported.
-    def start_listener_thread #:nodoc:
-      listener_thread = Thread.new do
-        loop do
-          if @jabber.received_messages?
-            @jabber.received_messages do |message|
-              # Remove the Jabber resourse, if any
-              sender = message.from.to_s.sub(/\/.+$/, '')
-
-              if message.type == :chat
-                parse_thread = Thread.new do
-                  parse_command(sender, message.body)
-                end
-
-                parse_thread.join
-              end
-            end
-          end
-
-          sleep 1
+    def start_listener_thread
+      @jabber.add_message_callback do |m|
+        message = m.body
+        if message && message != '' && !m.composing?
+          parse_command( m.from, message )
         end
       end
-
-      listener_thread.join
     end
+
 
   end
 end
