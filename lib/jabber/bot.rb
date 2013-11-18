@@ -32,6 +32,35 @@ require 'xmpp4r-simple'
 module Jabber
 
   class Bot
+    class Authorizee
+      # ----------------------------------------------------------------- allowed?
+      def allowed?( email )
+        false
+      end
+      def self.domain( domain )
+        DomainAuthorizee.new( domain )
+      end
+    end
+    class DomainAuthorizee < Authorizee
+      attr_reader :domain
+      def initialize( domain )
+        @domain = domain
+      end
+      # ----------------------------------------------------------------- allowed?
+      def allowed?( email )
+        email =~ /@#{domain}/
+      end
+    end
+    class EmailAuthorizee < Authorizee
+      def initialize( e )
+        @email = 2
+      end
+            # ----------------------------------------------------------------- allowed?
+      def allowed?( email )
+        @email == email
+      end
+    end
+
 
     # Direct access to the underlying Jabber::Simple object.
     attr_reader :jabber
@@ -85,10 +114,11 @@ module Jabber
       if @config[:name].nil? || @config[:name].length == 0
         @config[:name] = @config[:jabber_id].sub(/@.+$/, '')
       end
-
-      unless @config[:master].is_a?(Array)
-        @config[:master] = [@config[:master]]
+      master = @config.delete( :master )
+      unless master.is_a?(Array)
+        master = [master]
       end
+      Command.set_master( master )
 
       @commands = { :spec => [], :meta => {} }
 
@@ -187,6 +217,9 @@ module Jabber
         @name = command_name( args[:syntax] )
         @syntax = args[:syntax].is_a?( Array ) ? args[:syntax] : [ args[:syntax] ]
         @description = args[:description]
+        @authorizees = args[:authorizees]
+        @authorizees = [@authorizees] unless @authorizees.is_a?( Array ) 
+
         @is_public = args[:is_public] || false
         @regex = args[:regex]
         @is_alias = false
@@ -198,8 +231,28 @@ module Jabber
           end
         end
       end
+      def self.set_master( master )
+        @master = master
+      end
+      def run( message )
+        match = message.match( regex )
+        params = match.captures
+        params = params.pop if params.count < 2
+        response = callback.call( sender, params )
+        deliver( sender, response ) unless response.nil?
+      end
+      def self.find_matching_command( message )
+        @@commands.values.each do |command|
+          message.match( command.regex )
+          return command unless match.nil?
+        end
+        return nil
+      end
+      def self.master
+        @master
+      end
       def authorized?( sender )
-        false
+        self.class.master.include?( sender )
       end
       def self.by_name
         @@commands.keys.sort.each do |command_name|
@@ -255,11 +308,25 @@ module Jabber
     # You can specify a custom startup message with the ':startup_message'
     # configuration setting.
     def connect
+      @jabber = Jabber::Client.new( jabber_id )
+      if @config[:host]
+        @jabber.connect( @config[:host], 5222 )
+      else
+        @jabber.connect
+      end
+      @jabber.auth( @config[:password] )
+      @jabber.send( Jabber::Presence.new.set_type( :available ) )
+      eliver( Command.master, (@config[:startup_message] || "NAME reporting for duty.").gsub("NAME", @config[:name]))
+
+      start_listener_thread
+      Thread.stop
+    end
+
+    def connect
       @jabber = Jabber::Simple.new(@config[:jabber_id], @config[:password])
 
       presence(@config[:presence], @config[:status], @config[:priority])
 
-      deliver(@config[:master], (@config[:startup_message] || "NAME reporting for duty.").gsub("NAME", @config[:name]))
 
       start_listener_thread
     end
@@ -278,19 +345,9 @@ module Jabber
     # to restart it by issuing a command.
     def disconnect
       if @jabber.connected?
-        deliver(@config[:master], "#{@config[:name]} disconnecting...")
+        deliver( Command.master, "#{@config[:name]} disconnecting...")
         @jabber.disconnect
       end
-    end
-
-    # Returns an Array of masters
-    def master
-      @config[:master]
-    end
-
-    # Returns +true+ if the given Jabber id is a master, +false+ otherwise.
-    def master?(jabber_id)
-      @config[:master].include? jabber_id
     end
 
     # Sets the bot presence, status message and priority.
@@ -376,26 +433,12 @@ module Jabber
     #
     # If the bot has not been made public, commands from anyone other than the
     # bot master(s) will be silently ignored.
-    def parse_command(sender, message) #:nodoc:
-      is_master = master?(sender)
-
-      if @config[:is_public] || is_master
-        @commands[:spec].each do |command|
-          if command[:is_public] || is_master
-            match = message.strip.match(command[:regex])
-
-            unless match.nil?
-              params = match.captures                     # Pass an array,
-              params = params.pop if params.count < 2     # a string, or nil.
-
-              response = command[:callback].call(sender, params)
-              deliver(sender, response) unless response.nil?
-
-              return
-            end
-          end
-        end
-
+    def parse_command( sender, message) #:nodoc:
+      message.strip!
+      command = Command.find_matching_command( message )
+      if command && command.authorized?( sender )
+        command.run( message, sender )
+      else
         if @config[:misunderstood_message]
           response = "I don't understand '#{message.strip}' Try saying 'help' " +
               "to see what commands I understand."
