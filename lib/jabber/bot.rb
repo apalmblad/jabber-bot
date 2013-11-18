@@ -177,20 +177,80 @@ module Jabber
     #  ) { rand(10).to_s }
     #
     def add_command(command, &callback)
-      name = command_name(command[:syntax])
+      Command.new( command, &callback )
+    end
+    
+    class Command
+      attr_reader :syntax, :description, :is_public, :is_alias, :name
+      def initialize( args, &callback )
+        raise "Command missing name!" unless args[:syntax]
+        @name = command_name( args[:syntax] )
+        @syntax = args[:syntax].is_a?( Array ) ? args[:syntax] : [ args[:syntax] ]
+        @description = args[:description]
+        @is_public = args[:is_public] || false
+        @regex = args[:regex]
+        @is_alias = false
+        @callback = callback
+        self.class.store_command( @name, self )
+        if args[:alias]
+          command[:alias].each do |a|
+            add_command_alias( self, a, callback)
+          end
+        end
+      end
+      def authorized?( sender )
+        false
+      end
+      def self.by_name
+        @@commands.keys.sort.each do |command_name|
+          yield @@commands[command_name]
+      end
+      def self.named( name )
+        @@commands[name]
+      end
+      
+      def show_in_help_for_sender( sender )
+       !is_alias && ( is_public || authorized?( sender ) )
+     end
+          # Add a command alias for the given original +command_name+
+      def add_command_alias( original, alias_command ) #:nodoc:
+        original.syntax << alias_command[:syntax]
+        alias_command[:is_public] = original_command.is_public
+        alias = self.class.new( alias_command )
+        alias.mark_as_alias!
+      end
 
-      # Add the command meta - used in the 'help' command response.
-      add_command_meta(name, command)
 
-      # Add the command spec - used for parsing incoming commands.
-      add_command_spec(command, callback)
+      def self.store_command( command )
+        @@commands ||= { }
+        @@commands[command.name] = command
+      end
+      def self.all
+        @@commands
+      end
+      def help_description
+        syntax.map { |syntax| "#{syntax}\n" }.join('') + "  #{command.description}\n\n"
+      end
+      def short_help_description
+        help_description
+      end
+      protected
+      
+      def mark_as_alias!
+        @is_alias = true
+      end
+      
+      private
 
-      # Add any command aliases to the command meta and spec
-      unless command[:alias].nil?
-        command[:alias].each { |a| add_command_alias(name, a, callback) }
+      def command_name(syntax) #:nodoc:
+        syntax = syntax.trim
+        if syntax =~ /\s/
+          syntax.sub(/^(\S+).*/, '\1')
+        else
+          syntax
+        end
       end
     end
-
     # Connect the bot, making it available to accept commands.
     # You can specify a custom startup message with the ':startup_message'
     # configuration setting.
@@ -273,49 +333,6 @@ module Jabber
 
     private
 
-    # Add a command alias for the given original +command_name+
-    def add_command_alias(command_name, alias_command, callback) #:nodoc:
-      original_command = @commands[:meta][command_name]
-      original_command[:syntax] << alias_command[:syntax]
-
-      alias_name = command_name(alias_command[:syntax])
-
-      alias_command[:is_public] = original_command[:is_public]
-
-      add_command_meta(alias_name, original_command, true)
-      add_command_spec(alias_command, callback)
-    end
-
-    # Add a command meta
-    def add_command_meta(name, command, is_alias=false) #:nodoc:
-      syntax = command[:syntax]
-
-      @commands[:meta][name] = {
-        :syntax      => syntax.is_a?(Array) ? syntax : [syntax],
-        :description => command[:description],
-        :is_public   => command[:is_public] || false,
-        :is_alias    => is_alias
-      }
-    end
-
-    # Add a command spec
-    def add_command_spec(command, callback) #:nodoc:
-      @commands[:spec] << {
-        :regex     => command[:regex],
-        :callback  => callback,
-        :is_public => command[:is_public] || false
-      }
-    end
-
-    # Extract the command name from the given syntax
-    def command_name(syntax) #:nodoc:
-      if syntax.include? ' '
-        syntax.sub(/^(\S+).*/, '\1')
-      else
-        syntax
-      end
-    end
-
     # Returns the default help message describing the bot's command repertoire.
     # Commands are sorted alphabetically by name, and are displayed according
     # to the bot's and the commands's _public_ attribute.
@@ -323,27 +340,20 @@ module Jabber
       if command_name.nil? || command_name.length == 0
         # Display help for all commands
         help_message = "I understand the following commands:\n\n"
-
-        @commands[:meta].sort.each do |command|
-          # Thank you, Hash.sort
-          command = command[1]
-
-          if !command[:is_alias] && (command[:is_public] || master?(sender))
-            command[:syntax].each { |syntax| help_message += "#{syntax}\n" }
-            help_message += "  #{command[:description]}\n\n"
+        Command.by_name do |command|
+          if command.show_in_help?
+            help_message += command.short_help_description
           end
         end
       else
         # Display help for the given command
-        command = @commands[:meta][command_name]
+        command = Command.named( command_name )
 
-        if command.nil?
+        if command.nil? && command.show_in_help?
           help_message = "I don't understand '#{command_name}' Try saying" +
               " 'help' to see what commands I understand."
         else
-          help_message = ''
-          command[:syntax].each { |syntax| help_message += "#{syntax}\n" }
-          help_message += "  #{command[:description]} "
+          command.help_description
         end
       end
 
